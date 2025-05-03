@@ -2,8 +2,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import os
-import openai
 import requests
+from openai import OpenAI
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env файла (если есть)
@@ -14,7 +14,7 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     raise EnvironmentError("OPENAI_API_KEY is not set in environment variables.")
 
-client = openai.OpenAI(api_key=openai_api_key)
+client = OpenAI(api_key=openai_api_key)
 
 # Настройки Currents API
 currents_api_key = os.getenv("CURRENTS_API_KEY")

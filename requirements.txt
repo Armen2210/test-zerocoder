@@ -1,5 +1,7 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-openai==1.11.1
-python-dotenv==1.0.1
-requests==2.31.0
+fastapi
+uvicorn
+pydantic
+openai==0.27.0
+requests
+httpx
+tiktoken

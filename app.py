@@ -1,105 +1,122 @@
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
-import os
+import openai
 import requests
-from openai import OpenAI
-from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env файла (если есть)
-load_dotenv()
+app = FastAPI()
 
-# Инициализация клиента OpenAI
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise EnvironmentError("OPENAI_API_KEY is not set in environment variables.")
+# Получаем API ключи из переменных окружения
+openai.api_key = os.getenv("OPENAI_API_KEY")  # Устанавливаем ключ OpenAI из переменной окружения
+currentsapi_key = os.getenv("CURRENTS_API_KEY")  # Устанавливаем ключ Currents API из переменной окружения
 
-client = OpenAI(api_key=openai_api_key)
+# Проверяем, что оба API ключа заданы, иначе выбрасываем ошибку
+if not openai.api_key or not currentsapi_key:
+    raise ValueError("Переменные окружения OPENAI_API_KEY и CURRENTS_API_KEY должны быть установлены")
 
-# Настройки Currents API
-currents_api_key = os.getenv("CURRENTS_API_KEY")
-currents_api_url = "https://api.currentsapi.services/v1/search"
+class Topic(BaseModel):
+    topic: str  # Модель данных для получения темы в запросе
 
-app = FastAPI(title="AI Blog Generator", description="Генератор постов на основе темы и новостей")
-
-class TopicRequest(BaseModel):
-    topic: str
-
-@app.get("/ping")
-def ping():
-    """Проверка работоспособности API"""
-    return {"status": "ok"}
-
-def fetch_news(topic: str) -> str:
-    """Получить новости по теме с помощью Currents API"""
-    if not currents_api_key:
-        return ""
-
+# Функция для получения последних новостей на заданную тему
+def get_recent_news(topic: str):
+    url = "https://api.currentsapi.services/v1/latest-news"  # URL API для получения новостей
     params = {
-        "apiKey": currents_api_key,
-        "keywords": topic,
-        "language": "ru"
+        "language": "en",  # Задаем язык новостей
+        "keywords": topic,  # Ключевые слова для поиска новостей
+        "apiKey": currentsapi_key  # Передаем API ключ
     }
+    response = requests.get(url, params=params)  # Выполняем GET-запрос к API
+    if response.status_code != 200:
+        # Если статус код не 200, выбрасываем исключение с подробностями ошибки
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении данных: {response.text}")
+    
+    # Извлекаем новости из ответа, если они есть
+    news_data = response.json().get("news", [])
+    if not news_data:
+        return "Свежих новостей не найдено."  # Сообщение, если новости отсутствуют
+    
+    # Возвращаем заголовки первых 5 новостей, разделенных переносами строк
+    return "\n".join([article["title"] for article in news_data[:5]])
+
+# Функция для генерации контента на основе темы и новостей
+def generate_content(topic: str):
+    recent_news = get_recent_news(topic)  # Получаем последние новости по теме
+
     try:
-        response = requests.get(currents_api_url, params=params)
-        response.raise_for_status()
-        articles = response.json().get("news", [])
-        if not articles:
-            return ""
-        news_summary = "\n".join(f"- {a['title']}: {a['description']}" for a in articles[:3])
-        return news_summary
+        # Генерация заголовка для статьи
+        title = openai.ChatCompletion.create(
+            model="gpt-4o-mini",  # Используем модель GPT-4o-mini
+            messages=[{
+                "role": "user", 
+                "content": f"Придумайте привлекательный и точный заголовок для статьи на тему '{topic}', с учётом актуальных новостей:\n{recent_news}. Заголовок должен быть интересным и ясно передавать суть темы."
+            }],
+            max_tokens=60,  # Ограничиваем длину ответа
+            temperature=0.5,  # Умеренная случайность
+            stop=["\n"]  # Прерывание на новой строке
+        ).choices[0].message.content.strip()
+
+        # Генерация мета-описания для статьи
+        meta_description = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user", 
+                "content": f"Напишите мета-описание для статьи с заголовком: '{title}'. Оно должно быть полным, информативным и содержать основные ключевые слова."
+            }],
+            max_tokens=120,  # Увеличиваем лимит токенов для полного ответа
+            temperature=0.5,
+            stop=["."]
+        ).choices[0].message.content.strip()
+
+        # Генерация полного контента статьи
+        post_content = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user", 
+                "content": f"""Напишите подробную статью на тему '{topic}', используя последние новости:\n{recent_news}. 
+                Статья должна быть:
+                1. Информативной и логичной
+                2. Содержать не менее 1500 символов
+                3. Иметь четкую структуру с подзаголовками
+                4. Включать анализ текущих трендов
+                5. Иметь вступление, основную часть и заключение
+                6. Включать примеры из актуальных новостей
+                7. Каждый абзац должен быть не менее 3-4 предложений
+                8. Текст должен быть легким для восприятия и содержательным"""
+            }],
+            max_tokens=1500,  # Лимит токенов для развернутого текста
+            temperature=0.5,
+            presence_penalty=0.6,  # Штраф за повторение фраз
+            frequency_penalty=0.6
+        ).choices[0].message.content.strip()
+
+        # Возвращаем сгенерированный контент
+        return {
+            "title": title,
+            "meta_description": meta_description,
+            "post_content": post_content
+        }
+    
     except Exception as e:
-        return ""  # Без новостей всё равно продолжаем
+        # Обрабатываем ошибки генерации
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации контента: {str(e)}")
 
-def generate_post_with_news(topic: str) -> dict:
-    """Сгенерировать заголовок, мета и пост, используя OpenAI и новости как контекст"""
-    news_context = fetch_news(topic)
-    context_note = f"\n\nВот последние новости по теме:\n{news_context}" if news_context else ""
+@app.post("/generate-post")
+async def generate_post_api(topic: Topic):
+    # Обрабатываем запрос на генерацию поста
+    return generate_content(topic.topic)
 
-    prompt_title = f"Придумайте привлекательный заголовок для поста на тему: {topic}.{context_note}"
-    response_title = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt_title}],
-        max_tokens=50,
-        temperature=0.7,
-    )
-    title = response_title.choices[0].message.content.strip()
+@app.get("/")
+async def root():
+    # Корневой эндпоинт для проверки работоспособности сервиса
+    return {"message": "Service is running"}
 
-    prompt_meta = f"Напишите краткое, но информативное мета-описание для поста с заголовком: {title}.{context_note}"
-    response_meta = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt_meta}],
-        max_tokens=100,
-        temperature=0.7,
-    )
-    meta_description = response_meta.choices[0].message.content.strip()
+@app.get("/heartbeat")
+async def heartbeat_api():
+    # Эндпоинт проверки состояния сервиса
+    return {"status": "OK"}
 
-    prompt_post = (
-        f"Напишите подробный и увлекательный пост для блога на тему: {topic}. "
-        f"Используйте короткие абзацы, подзаголовки, примеры и ключевые слова для лучшего восприятия и SEO-оптимизации."
-        f"{context_note}"
-    )
-    response_post = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt_post}],
-        max_tokens=2048,
-        temperature=0.7,
-    )
-    post_content = response_post.choices[0].message.content.strip()
-
-    return {
-        "title": title,
-        "meta_description": meta_description,
-        "post_content": post_content
-    }
-
-@app.post("/generate")
-def generate(topic_req: TopicRequest):
-    try:
-        result = generate_post_with_news(topic_req.topic)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Запуск сервера:
-# uvicorn main:app --reload
+if __name__ == "__main__":
+    import uvicorn
+    # Запуск приложения с указанием порта
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
